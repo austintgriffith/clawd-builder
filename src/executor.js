@@ -111,7 +111,7 @@ export async function executeAllSteps(steps, buildDir, context) {
           }
         }
 
-        const validation = await validateStep(step, result);
+        const validation = await validateStep(step, result, projectDir);
 
         if (validation.passed) {
           state[stepId].status = 'completed';

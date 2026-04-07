@@ -22,6 +22,9 @@ These are the ONLY valid commands. Use them exactly as shown.
 
 "forge script" is FORBIDDEN in all steps. It bypasses SE2's key management and ABI generation.
 All deployment goes through "yarn deploy" which handles everything correctly.
+
+NEVER write or generate "packages/nextjs/contracts/deployedContracts.ts" — it is AUTO-GENERATED
+by "yarn deploy" and will be overwritten. Any step that writes it manually produces fake data.
 `;
 
 export async function simplePlan(job, messages, analysis, skills) {
