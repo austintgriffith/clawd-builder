@@ -190,8 +190,9 @@ async function buildTaskInstructions(step, { skills, plan, analysis, previousAtt
   if (step.description?.toLowerCase().includes('frontend') || step.description?.toLowerCase().includes('component')) {
     skillKeys.push('ethskills-frontend-ux', 'ethskills-frontend-playbook');
   }
-  skillKeys.push('scaffold-eth-agents');
-  const skillContext = skills ? buildSkillContext(skills, skillKeys, 2000) : '';
+  skillKeys.push('scaffold-eth', 'scaffold-eth-agents');
+  // High cap — these docs are the source of truth and must not be truncated
+  const skillContext = skills ? buildSkillContext(skills, skillKeys, 10000) : '';
 
   const planExcerpt = extractPlanSection(plan, step);
 

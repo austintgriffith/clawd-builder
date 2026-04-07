@@ -2,16 +2,33 @@ import { cheap, medium } from '../llm.js';
 import { logDecision } from '../logger.js';
 import { buildSkillContext } from '../skills.js';
 
+const SE2_COMMAND_RULES = `
+## CRITICAL SE2 COMMAND RULES — NEVER VIOLATE THESE
+
+- SCAFFOLD:  npx create-eth@latest -s foundry <name>
+- COMPILE:   yarn compile                          (NEVER "forge build")
+- LOCAL NODE: yarn chain  (or yarn fork --network base)  (NEVER "anvil" directly)
+- DEPLOY:    yarn deploy                           (NEVER "forge script ...")
+- DEPLOY LIVE: yarn deploy --network base          (NEVER "forge script ...")
+- VERIFY:    yarn verify --network base
+- FRONTEND:  yarn start
+- BUILD:     yarn next:build
+
+"forge script" is FORBIDDEN in all steps. It bypasses SE2's key management and ABI generation.
+All deployment goes through "yarn deploy" which handles everything correctly.
+`;
+
 export async function simplePlan(job, messages, analysis, skills) {
   const orchestrationContext = buildSkillContext(skills, ['ethskills-orchestration'], 6000);
-  const se2Context = buildSkillContext(skills, ['scaffold-eth', 'scaffold-eth-agents'], 4000);
+  // Pass scaffold-eth skills in full — these are the source of truth for all commands
+  const se2Context = buildSkillContext(skills, ['scaffold-eth', 'scaffold-eth-agents'], 20000);
 
   const prompt = `You are a build planner for Scaffold-ETH 2 dApps. You MUST follow the three-phase build system below exactly.
-
+${SE2_COMMAND_RULES}
 ## THREE-PHASE BUILD SYSTEM (THIS IS YOUR FRAMEWORK — FOLLOW IT)
 ${orchestrationContext}
 
-## SE2 Project Structure & Commands
+## SE2 Project Structure & Commands (SOURCE OF TRUTH — read in full)
 ${se2Context}
 
 ## Job Analysis
@@ -70,7 +87,8 @@ Be brief but specific. This guides the smart planner.`;
 
 export async function smartPlan(job, messages, analysis, skills, stepOutline) {
   const orchestrationContext = buildSkillContext(skills, ['ethskills-orchestration'], 5000);
-  const se2Context = buildSkillContext(skills, ['scaffold-eth', 'scaffold-eth-agents'], 4000);
+  // Pass scaffold-eth skills in full — these are the source of truth for all commands
+  const se2Context = buildSkillContext(skills, ['scaffold-eth', 'scaffold-eth-agents'], 20000);
   const extraSkills = (analysis.relevantSkills || [])
     .filter(s => s !== 'ethskills-orchestration')
     .slice(0, 3);
@@ -82,7 +100,7 @@ export async function smartPlan(job, messages, analysis, skills, stepOutline) {
     .join('\n\n');
 
   const prompt = `You are a senior architect writing a detailed build plan for a LeftClaw Services build job. You MUST follow the three-phase build system from ethskills.com/orchestration exactly.
-
+${SE2_COMMAND_RULES}
 ## Job
 - ID: ${job.id}
 - Client: ${job.client}
@@ -103,7 +121,7 @@ ${stepOutline}
 ## THREE-PHASE BUILD METHODOLOGY (MANDATORY — follow this exactly)
 ${orchestrationContext}
 
-## SE2 Project Structure & Commands
+## SE2 Project Structure & Commands (SOURCE OF TRUTH — read in full)
 ${se2Context}
 
 ## Additional Skills
@@ -169,6 +187,8 @@ Follow ethskills.com guidance exactly. Use Scaffold-ETH 2 patterns. Deploy to Ba
 
 export async function generateSteps(plan, analysis) {
   const prompt = `Extract the executable build steps from this plan as a JSON array. The plan follows a three-phase structure — preserve the phase in each step.
+${SE2_COMMAND_RULES}
+IMPORTANT: If the plan mentions "forge script" anywhere, replace it with the correct "yarn deploy" (or "yarn deploy --network <network>") in the extracted step's command field.
 
 ## Plan
 ${plan}

@@ -432,7 +432,7 @@ async function executeCodeGen(step, assembled, ctx) {
 
   const filesWritten = writeFilesFromOutput(llmOutput, projectDir);
 
-  // Compile-check: if we wrote any .sol files, run forge build immediately
+  // Compile-check: if we wrote any .sol files, run yarn compile immediately
   // and fix compile errors before declaring the step complete.
   if (filesWritten.some(f => f.relativePath.endsWith('.sol'))) {
     await compileCheckSolidity(filesWritten, projectDir, buildDir, step, ctx);
