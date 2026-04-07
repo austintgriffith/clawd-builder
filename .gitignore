@@ -1,0 +1,5 @@
+node_modules/
+builds/
+.env
+.env.*
+plan.md
