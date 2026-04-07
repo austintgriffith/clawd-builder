@@ -6,10 +6,11 @@ import { log, logStepExecution } from './logger.js';
 import { assembleContext, classifyStep } from './context-assembler.js';
 import { writeFilesFromOutput } from './file-writer.js';
 import { validateStep } from './step-validator.js';
+import { fixCodeFromError } from './fixer.js';
 
 const MAX_RETRIES = 2;
 const SHELL_TIMEOUT_MS = 180_000;
-const LONG_RUNNING_PATTERNS = /\b(fork|start|dev|serve|watch)\b/i;
+const LONG_RUNNING_PATTERNS = /\byarn\s+(fork|start|dev|serve|watch)\b/i;
 const BACKGROUND_READY_TIMEOUT_MS = 30_000;
 
 const backgroundProcesses = [];
@@ -75,16 +76,16 @@ export async function executeAllSteps(steps, buildDir, context) {
 
     let lastFeedback = null;
     let success = false;
+    const stepType = classifyStep(step);
 
     // Snapshot project dir contents before shell steps so we can clean up on retry
-    const dirSnapshotBefore = classifyStep(step) === 'shell_cmd'
+    const dirSnapshotBefore = stepType === 'shell_cmd'
       ? snapshotDir(projectDir) : null;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       state[stepId].attempts = attempt + 1;
       if (attempt > 0) {
         logStepExecution(stepId, 'retry', `Attempt ${attempt + 1}/${MAX_RETRIES + 1}: ${lastFeedback?.slice(0, 100)}`);
-        // Clean up directories created by the previous failed attempt
         if (dirSnapshotBefore) {
           cleanupNewDirs(projectDir, dirSnapshotBefore);
         }
@@ -129,6 +130,18 @@ export async function executeAllSteps(steps, buildDir, context) {
           });
           success = true;
           break;
+        }
+
+        // Shell step failed -- try to fix the source code before retrying
+        if (result.stepType === 'shell_cmd' && result.exitCode !== 0) {
+          const errorText = result.stderr || result.stdout || '';
+          const fixes = await fixCodeFromError(errorText, projectDir, step, context);
+          if (fixes && fixes.some(f => f.fixed)) {
+            const fixedFiles = fixes.filter(f => f.fixed).map(f => f.path).join(', ');
+            logStepExecution(stepId, 'fixing', `Fixed ${fixedFiles} — retrying command`);
+            lastFeedback = `Fixed files: ${fixedFiles}. Retrying.`;
+            continue;
+          }
         }
 
         lastFeedback = `${validation.reason}. Suggestions: ${validation.suggestions.join('; ')}`;
@@ -211,16 +224,16 @@ async function executeReadContext(step, assembled, ctx) {
 }
 
 async function executeShellCmd(step, assembled, ctx) {
-  const command = preprocessCommand(assembled.command, ctx.projectDir);
+  const { processed, extraEnv } = preprocessCommand(assembled.command, ctx.projectDir);
   const { projectDir, buildDir } = ctx;
 
-  const isLongRunning = LONG_RUNNING_PATTERNS.test(command);
+  const isLongRunning = LONG_RUNNING_PATTERNS.test(processed);
 
   if (isLongRunning) {
-    return executeLongRunningCmd(step, command, projectDir, buildDir);
+    return executeLongRunningCmd(step, processed, projectDir, buildDir, extraEnv);
   }
 
-  return executeBlockingCmd(step, command, projectDir, buildDir);
+  return executeBlockingCmd(step, processed, projectDir, buildDir, extraEnv);
 }
 
 /**
@@ -228,27 +241,37 @@ async function executeShellCmd(step, assembled, ctx) {
  * - create-eth: add --skip-install, then install with immutable installs disabled
  * - Strip redundant `cd <project>` prefixes (projectDir is already set)
  * - yarn install: disable immutable installs
+ *
+ * NOTE: Never run `forge script` directly. Deployment must go through
+ * `yarn deploy` (or `yarn deploy --network <network>`) which handles
+ * key management, ABI generation, and everything else via SE-2's scripts.
  */
 function preprocessCommand(command, projectDir) {
+  if (/forge\s+script/.test(command)) {
+    throw new Error(
+      `FORBIDDEN: "forge script" must not be called directly. Use "yarn deploy" or "yarn deploy --network <network>" instead. ` +
+      `SE-2's yarn deploy handles key management, ABI generation, and deployment correctly.`
+    );
+  }
+
   if (/create-eth/.test(command)) {
     const projectName = command.match(/create-eth@\S+\s+(?:-\w\s+\w+\s+)?(\w+)/)?.[1] || 'project';
     const skipInstall = command.includes('--skip-install') ? '' : ' --skip-install';
     const scaffoldPart = command.replace(/(create-eth@\S+)/, `$1${skipInstall}`)
       .replace(/&&\s*cd\s+\S+\s*&&\s*yarn\s+install.*$/, '');
-    return `${scaffoldPart} && cd ${projectName} && YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install`;
+    return { processed: `${scaffoldPart} && cd ${projectName} && YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install`, extraEnv: {} };
   }
 
-  // Strip "cd <dir> &&" prefixes since projectDir is already the project root
   let cmd = command.replace(/^cd\s+\S+\s*&&\s*/, '');
 
   if (/yarn\s+install/.test(cmd) && !cmd.includes('YARN_ENABLE_IMMUTABLE_INSTALLS')) {
     cmd = cmd.replace(/yarn\s+install/, 'YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install');
   }
 
-  return cmd;
+  return { processed: cmd, extraEnv: {} };
 }
 
-function executeBlockingCmd(step, command, projectDir, buildDir) {
+function executeBlockingCmd(step, command, projectDir, buildDir, extraEnv = {}) {
   log(`EXECUTOR: running command: ${command}`);
 
   let stdout = '';
@@ -261,7 +284,7 @@ function executeBlockingCmd(step, command, projectDir, buildDir) {
       timeout: SHELL_TIMEOUT_MS,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, HOME: process.env.HOME },
+      env: { ...process.env, HOME: process.env.HOME, ...extraEnv },
     });
   } catch (err) {
     exitCode = err.status || 1;
@@ -290,7 +313,7 @@ function executeBlockingCmd(step, command, projectDir, buildDir) {
  * Wait for a readiness signal in stdout/stderr, then return success.
  * The process keeps running; it will be killed when execution finishes.
  */
-function executeLongRunningCmd(step, command, projectDir, buildDir) {
+function executeLongRunningCmd(step, command, projectDir, buildDir, extraEnv = {}) {
   return new Promise((resolve) => {
     log(`EXECUTOR: spawning background process: ${command}`);
 
@@ -301,21 +324,20 @@ function executeLongRunningCmd(step, command, projectDir, buildDir) {
       cwd: projectDir,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, HOME: process.env.HOME },
+      env: { ...process.env, HOME: process.env.HOME, ...extraEnv },
     });
 
     backgroundProcesses.push({ pid: child.pid, label: `step-${step.id}: ${command}` });
 
     let settled = false;
     const readyPatterns = [
-      /listening/i,
-      /ready/i,
-      /started/i,
+      /listening on/i,
+      /ready in/i,
+      /compiled successfully/i,
       /running at/i,
       /localhost:\d+/i,
-      /anvil/i,
-      /forked/i,
       /block number/i,
+      /available accounts/i,
     ];
 
     function checkReady(data) {
@@ -357,14 +379,15 @@ function executeLongRunningCmd(step, command, projectDir, buildDir) {
     child.on('exit', (code) => {
       if (settled) return;
       settled = true;
-      allOutput += `\nEXIT CODE: ${code}\n`;
+      const exitCode = code ?? 1;
+      allOutput += `\nEXIT CODE: ${exitCode}\n`;
       writeFileSync(outputFile, allOutput);
       resolve({
         stepType: 'shell_cmd',
-        exitCode: code || 1,
+        exitCode,
         stdout: allOutput,
         stderr: '',
-        outputSummary: `Process exited with code ${code}`,
+        outputSummary: `Process exited with code ${exitCode}`,
         filesWritten: [],
       });
     });
@@ -391,7 +414,15 @@ async function executeCodeGen(step, assembled, ctx) {
   const { systemPrompt, userPrompt, targetModel } = assembled;
   const { projectDir, buildDir } = ctx;
 
-  const callFn = pickModelFn(targetModel);
+  const isSolidityStep = step.stage === 'contract_audit'
+    || step.description?.toLowerCase().includes('contract')
+    || step.description?.toLowerCase().includes('.sol')
+    || step.name?.toLowerCase().includes('deploy script')
+    || step.name?.toLowerCase().includes('.t.sol');
+  const effectiveModel = isSolidityStep && targetModel === 'minimax-m2.7'
+    ? 'claude-sonnet-4.6' : targetModel;
+
+  const callFn = pickModelFn(effectiveModel);
   const llmOutput = await callFn(systemPrompt, userPrompt, {
     role: `exec-${step.id}`,
     maxTokens: 8192,
@@ -401,12 +432,53 @@ async function executeCodeGen(step, assembled, ctx) {
 
   const filesWritten = writeFilesFromOutput(llmOutput, projectDir);
 
+  // Compile-check: if we wrote any .sol files, run forge build immediately
+  // and fix compile errors before declaring the step complete.
+  if (filesWritten.some(f => f.relativePath.endsWith('.sol'))) {
+    await compileCheckSolidity(filesWritten, projectDir, buildDir, step, ctx);
+  }
+
   return {
     stepType: 'code_gen',
     llmOutput,
     filesWritten,
     outputSummary: `Generated ${filesWritten.length} file(s): ${filesWritten.map(f => f.relativePath).join(', ')}`,
   };
+}
+
+/**
+ * After writing Solidity files, run yarn compile to check compilation.
+ * If it fails, use the fixer to repair, up to 3 cycles.
+ */
+async function compileCheckSolidity(filesWritten, projectDir, buildDir, step, ctx) {
+  const COMPILE_RETRIES = 3;
+
+  for (let i = 0; i < COMPILE_RETRIES; i++) {
+    try {
+      execSync('yarn compile', {
+        cwd: projectDir,
+        timeout: 60000,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      log(`COMPILE-CHECK: step ${step.id} — yarn compile OK`);
+      return;
+    } catch (err) {
+      const stderr = err.stderr || '';
+      const stdout = err.stdout || '';
+      const errorOutput = stderr + '\n' + stdout;
+      log(`COMPILE-CHECK: step ${step.id} — yarn compile FAILED (attempt ${i + 1}/${COMPILE_RETRIES})`);
+
+      if (i < COMPILE_RETRIES - 1) {
+        const fixes = await fixCodeFromError(errorOutput, projectDir, step, ctx);
+        if (fixes && fixes.some(f => f.fixed)) {
+          log(`COMPILE-CHECK: fixed ${fixes.filter(f => f.fixed).map(f => f.path).join(', ')} — rebuilding`);
+          continue;
+        }
+      }
+    }
+  }
+  log(`COMPILE-CHECK: step ${step.id} — yarn compile still failing after ${COMPILE_RETRIES} attempts`);
 }
 
 function pickModelFn(targetModel) {
