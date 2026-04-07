@@ -5,14 +5,20 @@ import { buildSkillContext } from '../skills.js';
 const SE2_COMMAND_RULES = `
 ## CRITICAL SE2 COMMAND RULES — NEVER VIOLATE THESE
 
-- SCAFFOLD:  npx create-eth@latest -s foundry <name>
-- COMPILE:   yarn compile                          (NEVER "forge build")
-- LOCAL NODE: yarn chain  (or yarn fork --network base)  (NEVER "anvil" directly)
-- DEPLOY:    yarn deploy                           (NEVER "forge script ...")
-- DEPLOY LIVE: yarn deploy --network base          (NEVER "forge script ...")
-- VERIFY:    yarn verify --network base
-- FRONTEND:  yarn start
-- BUILD:     yarn next:build
+These are the ONLY valid commands. Use them exactly as shown.
+
+- SCAFFOLD:      npx create-eth@latest -s foundry <name>
+- COMPILE:       yarn compile                        (NEVER "forge build")
+- TESTS:         yarn test                           (NEVER "forge test" directly)
+- LOCAL NODE:    yarn chain                          (NEVER "anvil" directly)
+- FORK:          yarn fork --network base            (NEVER "anvil --fork-url ...")
+- DEPLOY LOCAL:  yarn deploy                         (NEVER "forge script ...")
+- DEPLOY LIVE:   yarn deploy --network base          (NEVER "forge script ...")
+- VERIFY:        yarn verify --network base
+- DEV SERVER:    yarn start
+- BUILD:         yarn next:build                     (NEVER "yarn build" — does not exist)
+- IPFS DEPLOY:   yarn ipfs
+- VERCEL:        yarn vercel:yolo --prod
 
 "forge script" is FORBIDDEN in all steps. It bypasses SE2's key management and ABI generation.
 All deployment goes through "yarn deploy" which handles everything correctly.
