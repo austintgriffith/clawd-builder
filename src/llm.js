@@ -50,7 +50,7 @@ export async function chat(model, systemPrompt, userMessage, opts = {}) {
           'X-API-Key': apiKey,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(180000),
+        signal: AbortSignal.timeout(300000),
       });
 
       if (!res.ok) {

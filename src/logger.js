@@ -86,6 +86,23 @@ export function logDecision(agent, decision, reason) {
   }
 }
 
+export function logStepExecution(stepId, status, detail) {
+  const entry = {
+    type: 'step_execution',
+    timestamp: new Date().toISOString(),
+    stepId,
+    status,
+    detail,
+  };
+  traceEntries.push(entry);
+
+  log(`EXEC [${stepId}] ${status} — ${detail}`);
+
+  if (buildDir) {
+    writeFileSync(join(buildDir, 'trace.json'), JSON.stringify(traceEntries, null, 2));
+  }
+}
+
 function estimateCost(model, promptTokens, completionTokens) {
   const rates = PRICING[model] || { input: 1.00, output: 5.00 };
   const inputCost = (promptTokens / 1_000_000) * rates.input;

@@ -160,7 +160,7 @@ Follow ethskills.com guidance exactly. Use Scaffold-ETH 2 patterns. Deploy to Ba
   const result = await medium(
     'You are a senior Ethereum dApp architect. You follow the three-phase build system (Phase 1 local, Phase 2 live contracts, Phase 3 production) exactly. Write precise, actionable build plans.',
     prompt,
-    { role: 'smart-planner', maxTokens: 4096 }
+    { role: 'smart-planner', maxTokens: 8192 }
   );
 
   logDecision('smart-planner', 'plan_written', `Generated detailed build plan`);
