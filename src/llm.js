@@ -34,6 +34,17 @@ export async function chat(model, systemPrompt, userMessage, opts = {}) {
 
   const start = Date.now();
   let lastError;
+  const promptChars = (systemPrompt || '').length + userMessage.length;
+
+  logLLM({ model, role: opts.role || 'unknown', promptChars, status: 'start' });
+
+  // Log a heartbeat every 30s so long LLM calls don't look like hangs
+  const heartbeat = setInterval(() => {
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    logLLM({ model, role: opts.role || 'unknown', promptChars, status: `waiting ${elapsed}s` });
+  }, 30000);
+
+  try {
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
@@ -84,9 +95,10 @@ export async function chat(model, systemPrompt, userMessage, opts = {}) {
 
       return content;
     } catch (err) {
-      if (err.name === 'TimeoutError' && attempt < MAX_RETRIES) {
-        lastError = err;
-        continue;
+      if (err.name === 'TimeoutError') {
+        const elapsed = Math.round((Date.now() - start) / 1000);
+        logLLM({ model, role: opts.role || 'unknown', promptChars, status: `TIMEOUT after ${elapsed}s` });
+        if (attempt < MAX_RETRIES) { lastError = err; continue; }
       }
       if (err.message?.includes('LLM API error') && attempt < MAX_RETRIES) {
         lastError = err;
@@ -97,6 +109,10 @@ export async function chat(model, systemPrompt, userMessage, opts = {}) {
   }
 
   throw lastError || new Error('LLM call failed after retries');
+
+  } finally {
+    clearInterval(heartbeat);
+  }
 }
 
 export function cheap(systemPrompt, userMessage, opts = {}) {

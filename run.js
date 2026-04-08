@@ -215,6 +215,8 @@ async function run() {
 }
 
 run().catch(err => {
+  // Write the crash to build.log so it's visible in the tail output
+  try { log(`FATAL ERROR: ${err.message}\n${err.stack}`); } catch { /* logger may not be init */ }
   console.error('FATAL:', err);
   process.exit(1);
 });

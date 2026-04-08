@@ -33,7 +33,13 @@ export function log(message) {
   console.log(line.trimEnd());
 }
 
-export function logLLM({ model, role, promptChars, responseChars, tokens, latencyMs }) {
+export function logLLM({ model, role, promptChars, responseChars, tokens, latencyMs, status }) {
+  // status-only calls (start, heartbeat, timeout) — just log, don't add to trace
+  if (status) {
+    log(`LLM [${model}] role=${role} prompt=${promptChars}ch — ${status}`);
+    return;
+  }
+
   const entry = {
     type: 'llm_call',
     timestamp: new Date().toISOString(),

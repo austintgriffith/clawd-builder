@@ -95,13 +95,12 @@ Be brief but specific. This guides the smart planner.`;
 }
 
 export async function smartPlan(job, messages, analysis, skills, stepOutline) {
-  const orchestrationContext = buildSkillContext(skills, ['ethskills-orchestration'], 5000);
-  // Pass scaffold-eth skills in full — these are the source of truth for all commands
-  const se2Context = buildSkillContext(skills, ['scaffold-eth', 'scaffold-eth-agents'], 20000);
+  const orchestrationContext = buildSkillContext(skills, ['ethskills-orchestration'], 4000);
+  const se2Context = buildSkillContext(skills, ['scaffold-eth', 'scaffold-eth-agents'], 8000);
   const extraSkills = (analysis.relevantSkills || [])
     .filter(s => s !== 'ethskills-orchestration')
-    .slice(0, 3);
-  const extraContext = buildSkillContext(skills, extraSkills, 1000);
+    .slice(0, 2);
+  const extraContext = buildSkillContext(skills, extraSkills, 800);
 
   const clientChat = messages
     .filter(m => m.type === 'client_message' || m.type === 'ai_response')
@@ -116,16 +115,16 @@ ${SE2_COMMAND_RULES}
 - Service Type: ${job.serviceTypeId} (Build)
 
 ## Description
-${(job.description || '').slice(0, 2000)}
+${(job.description || '').slice(0, 1500)}
 
 ## Client Chat
-${clientChat || '(none)'}
+${clientChat.slice(0, 1500) || '(none)'}
 
 ## Orchestrator Analysis
-${JSON.stringify(analysis, null, 2)}
+${JSON.stringify(analysis, null, 2).slice(0, 1500)}
 
 ## Step Outline (from simple planner — already organized by phase)
-${stepOutline}
+${stepOutline.slice(0, 3000)}
 
 ## THREE-PHASE BUILD METHODOLOGY (MANDATORY — follow this exactly)
 ${orchestrationContext}
