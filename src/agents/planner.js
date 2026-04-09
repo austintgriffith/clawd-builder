@@ -1,5 +1,5 @@
 import { cheap, medium } from '../llm.js';
-import { logDecision } from '../logger.js';
+import { logDecision, log } from '../logger.js';
 import { buildSkillContext } from '../skills.js';
 
 const SE2_COMMAND_RULES = `
@@ -95,19 +95,14 @@ Be brief but specific. This guides the smart planner.`;
 }
 
 export async function smartPlan(job, messages, analysis, skills, stepOutline) {
-  const orchestrationContext = buildSkillContext(skills, ['ethskills-orchestration'], 4000);
-  const se2Context = buildSkillContext(skills, ['scaffold-eth', 'scaffold-eth-agents'], 8000);
-  const extraSkills = (analysis.relevantSkills || [])
-    .filter(s => s !== 'ethskills-orchestration')
-    .slice(0, 2);
-  const extraContext = buildSkillContext(skills, extraSkills, 800);
-
   const clientChat = messages
     .filter(m => m.type === 'client_message' || m.type === 'ai_response')
     .map(m => `[${m.type}] ${m.content}`)
     .join('\n\n');
 
-  const prompt = `You are a senior architect writing a detailed build plan for a LeftClaw Services build job. You MUST follow the three-phase build system from ethskills.com/orchestration exactly.
+  // Lean prompt — the job description already contains the spec.
+  // Sonnet doesn't need full skill files; it needs the job, the outline, and the rules.
+  const prompt = `Write a detailed Scaffold-ETH 2 build plan for this LeftClaw Services job.
 ${SE2_COMMAND_RULES}
 ## Job
 - ID: ${job.id}
@@ -115,81 +110,68 @@ ${SE2_COMMAND_RULES}
 - Service Type: ${job.serviceTypeId} (Build)
 
 ## Description
-${(job.description || '').slice(0, 1500)}
+${(job.description || '').slice(0, 2000)}
 
 ## Client Chat
-${clientChat.slice(0, 1500) || '(none)'}
+${clientChat.slice(0, 1000) || '(none)'}
 
 ## Orchestrator Analysis
-${JSON.stringify(analysis, null, 2).slice(0, 1500)}
+${JSON.stringify(analysis, null, 2).slice(0, 1200)}
 
 ## Step Outline (from simple planner — already organized by phase)
-${stepOutline.slice(0, 3000)}
-
-## THREE-PHASE BUILD METHODOLOGY (MANDATORY — follow this exactly)
-${orchestrationContext}
-
-## SE2 Project Structure & Commands (SOURCE OF TRUTH — read in full)
-${se2Context}
-
-## Additional Skills
-${extraContext}
+${stepOutline.slice(0, 2500)}
 
 ## Your Task
 
-Write a comprehensive build plan in markdown. Structure it around the THREE PHASES:
+Write a comprehensive build plan in markdown:
 
 ### 1. Architecture Overview
-- What goes onchain vs offchain
-- Contract design (functions, storage, events)
-- Frontend pages and components
-- Chain selection rationale
+- What goes onchain vs offchain, contract design, frontend components, chain rationale
 
 ### 2. Smart Contract Plan
 - Each contract: name, purpose, key functions, storage layout
-- Security considerations
-- Testing strategy (unit, fuzz, fork tests)
+- Security considerations, testing strategy
 
 ### 3. Frontend Plan
 - Component hierarchy
-- Hook usage (useScaffoldReadContract, useScaffoldWriteContract, useScaffoldEventHistory — NOT raw wagmi)
-- UX flows (three-button flow for token interactions, loading states, error handling)
-- Theming/styling requirements from client chat
-- DaisyUI classes where possible, custom CSS only when needed
+- Hook usage (useScaffoldReadContract, useScaffoldWriteContract — NOT raw wagmi)
+- UX flows (approval flow, loading states, error handling)
+- Theming/styling from client chat
+- DaisyUI classes where possible
 
-### 4. Phase 1 Steps (LOCAL: fork + contracts + tests + frontend on localhost)
-For each step: model tier, context needed, expected output, validation gate.
-- Scaffold project
-- Write contracts → deploy script → tests
-- \`yarn fork --network base\` + \`yarn deploy\` → validate deployedContracts.ts
-- Build frontend pages + components with SE2 hooks
-- Validate full user journey on localhost
+### 4. Phase 1 Steps (LOCAL: scaffold + contracts + tests + frontend on localhost)
+For each step: model tier, expected output, validation gate.
 
 ### 5. Phase 2 Steps (LIVE CONTRACTS + LOCAL UI)
-- Update scaffold.config.ts targetNetworks
-- \`yarn deploy --network base\` + \`yarn verify\`
-- Test with real wallet, polish UI, apply final theme
-- Validate contracts on Blockscout, full journey with live contracts
+- Deploy to Base, verify, test with real wallet, polish UI
 
 ### 6. Phase 3 Steps (PRODUCTION)
-- Pre-deploy checklist (burnerWalletMode, metadata, OG image)
-- Build + deploy frontend to BGIPFS
-- Production QA checklist
+- Metadata, BGIPFS deploy, production QA
 
 ### 7. Phase Transition Rules
-- Phase 3 bug → back to Phase 2
-- Phase 2 contract bug → back to Phase 1 (fix, regression test, redeploy)
-- Never hack around bugs in production
+- Phase 3 bug → Phase 2, Phase 2 contract bug → Phase 1, never hack in production
 
-Follow ethskills.com guidance exactly. Use Scaffold-ETH 2 patterns. Deploy to Base.`;
+Use SE2 patterns. Deploy to Base.`;
 
-  const result = await medium(
-    'You are a senior Ethereum dApp architect. You follow the three-phase build system (Phase 1 local, Phase 2 live contracts, Phase 3 production) exactly. Write precise, actionable build plans.',
-    prompt,
-    { role: 'smart-planner', maxTokens: 8192 }
-  );
+  const system = 'You are a senior Ethereum dApp architect. You follow the three-phase build system (Phase 1 local, Phase 2 live contracts, Phase 3 production) exactly. Write precise, actionable build plans.';
 
-  logDecision('smart-planner', 'plan_written', `Generated detailed build plan`);
+  // Try Sonnet first with reduced maxTokens (4096 keeps us well under gateway timeout)
+  try {
+    const result = await medium(system, prompt, { role: 'smart-planner', maxTokens: 4096 });
+    logDecision('smart-planner', 'plan_written', 'Generated detailed build plan (sonnet)');
+    return result;
+  } catch (err) {
+    log(`Smart planner (sonnet) failed: ${err.message}. Falling back to minimax...`);
+    logDecision('smart-planner', 'sonnet_failed', err.message);
+  }
+
+  // Fallback: minimax with full skill context (it's cheap, so we can give it more context)
+  const orchestrationContext = buildSkillContext(skills, ['ethskills-orchestration'], 4000);
+  const se2Context = buildSkillContext(skills, ['scaffold-eth', 'scaffold-eth-agents'], 8000);
+  const fallbackPrompt = prompt + `\n\n## Build Methodology Reference\n${orchestrationContext}\n\n## SE2 Reference\n${se2Context}`;
+
+  const result = await cheap(system, fallbackPrompt, { role: 'smart-planner-fallback', maxTokens: 4096 });
+  logDecision('smart-planner', 'plan_written', 'Generated build plan (minimax fallback)');
   return result;
 }
 
@@ -224,14 +206,28 @@ Output ONLY a valid JSON array. No markdown fences.`;
   const result = await cheap(
     'Extract build steps as a JSON array. Output ONLY valid JSON.',
     prompt,
-    { role: 'step-extractor', maxTokens: 4096 }
+    { role: 'step-extractor', maxTokens: 8192 }
   );
 
   try {
     const cleaned = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     return JSON.parse(cleaned);
   } catch {
-    logDecision('step-extractor', 'parse_failed', 'Could not parse steps JSON, returning raw');
-    return [{ raw: result }];
+    // Try to salvage truncated JSON — find the last complete object in the array
+    try {
+      const cleaned = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace > 0) {
+        const truncated = cleaned.slice(0, lastBrace + 1) + ']';
+        const parsed = JSON.parse(truncated);
+        if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].id) {
+          logDecision('step-extractor', 'parse_salvaged', `Salvaged ${parsed.length} steps from truncated JSON`);
+          return parsed;
+        }
+      }
+    } catch { /* salvage failed too */ }
+
+    logDecision('step-extractor', 'parse_failed', 'Could not parse steps JSON');
+    return [];
   }
 }

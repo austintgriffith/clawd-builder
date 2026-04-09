@@ -46,16 +46,21 @@ export async function fixCodeFromError(errorOutput, projectDir, step, context) {
     const relatedContext = gatherRelatedFiles(brokenCode, relPath, projectDir);
 
     const isSolidity = resolvedPath.endsWith('.sol');
+    const isTestFailure = fileErrors.some(e => e.type === 'test_failure');
     const callFn = isSolidity ? medium : cheap;
     const modelLabel = isSolidity ? 'sonnet (solidity fix)' : 'cheap (fix)';
 
-    log(`FIXER: fixing ${resolvedPath} (${fileErrors.length} errors) with ${modelLabel}`);
+    const systemPrompt = isTestFailure
+      ? `You are a test fixer. Tests are failing because they make incorrect assumptions about the contract. The CONTRACT is correct — fix the TESTS to match the contract's actual behavior. Return ONLY the corrected test file contents. No explanations, no markdown fences.`
+      : `You are a code fixer. You receive a file with compiler errors and must return ONLY the corrected file contents. No explanations, no markdown fences, no === markers. Output the raw file contents and nothing else.`;
+
+    log(`FIXER: fixing ${resolvedPath} (${fileErrors.length} ${isTestFailure ? 'test failures' : 'errors'}) with ${modelLabel}`);
 
     try {
       const fixedCode = await callFn(
-        `You are a code fixer. You receive a file with compiler errors and must return ONLY the corrected file contents. No explanations, no markdown fences, no === markers. Output the raw file contents and nothing else.`,
+        systemPrompt,
         `## File: ${resolvedPath}
-## Errors
+## ${isTestFailure ? 'Test Failures' : 'Errors'}
 ${errorSummary}
 
 ## Full Error Output
@@ -66,7 +71,7 @@ ${brokenCode}
 
 ${relatedContext}
 
-Fix ALL the errors listed above. Return ONLY the corrected file contents. Do not wrap in code fences or markers.`,
+Fix ALL the ${isTestFailure ? 'failing tests' : 'errors'} listed above. ${isTestFailure ? 'The contract is correct — fix the test expectations to match actual behavior.' : ''} Return ONLY the corrected file contents. Do not wrap in code fences or markers.`,
         { role: `fixer-${basename(relPath)}`, maxTokens: 8192 }
       );
 
@@ -140,6 +145,25 @@ function parseErrors(output) {
       line: parseInt(match[3], 10),
       type: 'generic',
     });
+  }
+
+  // Forge test failures — use the "Failing tests:" section which attributes each failure to its file:
+  //   "Encountered N failing test in test/BurnBoard.t.sol:BurnBoardTest"
+  //   "[FAIL: reason] test_name()"
+  const failingSectionRe = /failing tests? in ([^:]+):\w+\s*\n([\s\S]*?)(?=\n\n|Encountered a total)/g;
+  while ((match = failingSectionRe.exec(output)) !== null) {
+    const file = match[1].trim();
+    const block = match[2];
+    const failRe2 = /\[FAIL[:\s]*([^\]]*)\]\s*(\w+)\(\)/g;
+    let fmatch;
+    while ((fmatch = failRe2.exec(block)) !== null) {
+      errors.push({
+        message: `Test ${fmatch[2]}() failed: ${fmatch[1].trim()}`,
+        file,
+        line: 0,
+        type: 'test_failure',
+      });
+    }
   }
 
   return deduplicateErrors(errors);

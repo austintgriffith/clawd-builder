@@ -10,7 +10,7 @@ import { fixCodeFromError } from './fixer.js';
 
 const MAX_RETRIES = 2;
 const SHELL_TIMEOUT_MS = 180_000;
-const LONG_RUNNING_PATTERNS = /\byarn\s+(fork|start|dev|serve|watch)\b/i;
+const LONG_RUNNING_PATTERNS = /\byarn\s+(chain|fork|start|dev|serve|watch)\b/i;
 const BACKGROUND_READY_TIMEOUT_MS = 30_000;
 
 const backgroundProcesses = [];
@@ -227,9 +227,22 @@ async function executeShellCmd(step, assembled, ctx) {
   const { processed, extraEnv } = preprocessCommand(assembled.command, ctx.projectDir);
   const { projectDir, buildDir } = ctx;
 
-  const isLongRunning = LONG_RUNNING_PATTERNS.test(processed);
+  // Split "&&" chains where the first command is long-running (e.g. "yarn chain && yarn deploy").
+  // Start the long-running part as background, wait for readiness, then run the rest blocking.
+  const parts = processed.split(/\s*&&\s*/);
+  if (parts.length > 1 && LONG_RUNNING_PATTERNS.test(parts[0])) {
+    const bgCmd = parts[0];
+    const restCmd = parts.slice(1).join(' && ');
 
-  if (isLongRunning) {
+    log(`EXECUTOR: splitting command — background: "${bgCmd}", then blocking: "${restCmd}"`);
+
+    const bgResult = await executeLongRunningCmd(step, bgCmd, projectDir, buildDir, extraEnv);
+    if (bgResult.exitCode !== 0) return bgResult;
+
+    return executeBlockingCmd(step, restCmd, projectDir, buildDir, extraEnv);
+  }
+
+  if (LONG_RUNNING_PATTERNS.test(processed)) {
     return executeLongRunningCmd(step, processed, projectDir, buildDir, extraEnv);
   }
 
@@ -255,7 +268,10 @@ function preprocessCommand(command, projectDir) {
   }
 
   if (/create-eth/.test(command)) {
-    const projectName = command.match(/create-eth@\S+\s+(?:-\w\s+\w+\s+)?(\w+)/)?.[1] || 'project';
+    // Extract the project name — it's the last non-flag argument.
+    // Handles hyphens (burn-board), flags (-s foundry), and --skip-install.
+    const args = command.split(/\s+/).filter(a => a && !a.startsWith('-') && !/create-eth|npx|foundry|hardhat/.test(a));
+    const projectName = args[args.length - 1] || 'project';
     const skipInstall = command.includes('--skip-install') ? '' : ' --skip-install';
     const scaffoldPart = command.replace(/(create-eth@\S+)/, `$1${skipInstall}`)
       .replace(/&&\s*cd\s+\S+\s*&&\s*yarn\s+install.*$/, '');
